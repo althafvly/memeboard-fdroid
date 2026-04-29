@@ -99,6 +99,7 @@ fun SoundboardScreen() {
             SoundItem(name = "Gop Gop Gop", resId = R.raw.gopgopgop),
             SoundItem(name = "Lego Breaking", resId = R.raw.lego_breaking),
             SoundItem(name = "FAHHHHH", resId = R.raw.fah),
+            SoundItem(name = "FNAF jumpscare", resId = R.raw.fnaf),
             SoundItem(name = "Rizz", resId = R.raw.rizz),
             SoundItem(name = "Max Verstappen", resId = R.raw.max_verstrappen),
             SoundItem(name = "PLZ SPEED I NEED THISS", resId = R.raw.my_mom_is_kinda_homeless),
