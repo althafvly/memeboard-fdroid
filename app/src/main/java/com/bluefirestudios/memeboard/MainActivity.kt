@@ -14,10 +14,11 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,22 +27,32 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.bluefirestudios.memeboard.ui.theme.MemeBoardTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Collections
 import java.util.UUID
 import kotlin.math.ceil
 
@@ -69,68 +80,84 @@ data class SoundItem(
 @Composable
 fun SoundboardScreen() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val resources = remember(context) { context.resources }
     val soundsFile = remember(context) { File(context.filesDir, "sounds_list.txt") }
 
-    var sounds by remember {
-        mutableStateOf(listOf<SoundItem>())
+    val defaultSounds = remember {
+        listOf(
+            SoundItem(name = "ACK", resId = R.raw.ack),
+            SoundItem(name = "Dexter", resId = R.raw.dexter),
+            SoundItem(name = "Bruh", resId = R.raw.bruh),
+            SoundItem(name = "Bone Crack", resId = R.raw.bone_crack),
+            SoundItem(name = "Bazooka", resId = R.raw.rip_my_granny),
+            SoundItem(name = "Chicken Scream", resId = R.raw.chicken_tree),
+            SoundItem(name = "Dial Up", resId = R.raw.dial_up),
+            SoundItem(name = "The end", resId = R.raw.end),
+            SoundItem(name = "Galaxy Meme", resId = R.raw.galaxy_meme),
+            SoundItem(name = "Gay Echo", resId = R.raw.gay_echo),
+            SoundItem(name = "Gop Gop Gop", resId = R.raw.gopgopgop),
+            SoundItem(name = "Lego Breaking", resId = R.raw.lego_breaking),
+            SoundItem(name = "FAHHHHH", resId = R.raw.fah),
+            SoundItem(name = "Rizz", resId = R.raw.rizz),
+            SoundItem(name = "Max Verstappen", resId = R.raw.max_verstrappen),
+            SoundItem(name = "PLZ SPEED I NEED THISS", resId = R.raw.my_mom_is_kinda_homeless),
+            SoundItem(name = "SIXX SEVENN", resId = R.raw.six_seven),
+            SoundItem(name = "Vine Boom", resId = R.raw.vine_boom),
+            SoundItem(name = "Oh My God", resId = R.raw.oh_my_god),
+            SoundItem(name = "500 Cigarettes", resId = R.raw.fivehundred_cigarettes),
+            SoundItem(name = "GET OUT", resId = R.raw.get_out),
+            SoundItem(name = "Wat da HAILLL", resId = R.raw.wait_what_the_hail),
+            SoundItem(name = "Wobbly Wiggly", resId = R.raw.wobbly_wiggly),
+            SoundItem(name = "John CENAA!", resId = R.raw.john_cena),
+            SoundItem(name = "Yo Phone Linging", resId = R.raw.yo_phone_linging),
+            SoundItem(name = "Kim Jong Goon", resId = R.raw.kim_jong_goon),
+            SoundItem(name = "Prowler", resId = R.raw.prowler)
+        )
     }
 
+    var sounds by remember { mutableStateOf(listOf<SoundItem>()) }
     var isEditMode by remember { mutableStateOf(false) }
-    val isPlaying = remember { mutableStateOf(false) }
-    var showNameDialog by remember { mutableStateOf(false) }
+    var isAnyItemDragging by remember { mutableStateOf(false) }
+    var isPlaying by remember { mutableStateOf(false) }
+    var showAddDialog by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
+    var showResetDialog by remember { mutableStateOf(false) }
+    var soundToRename by remember { mutableStateOf<SoundItem?>(null) }
+    var soundToDelete by remember { mutableStateOf<SoundItem?>(null) }
     var pendingUri by remember { mutableStateOf<Uri?>(null) }
-    var newSoundName by remember { mutableStateOf("") }
+    var inputName by remember { mutableStateOf("") }
 
-    // Load sounds
-    LaunchedEffect(soundsFile) {
-        if (soundsFile.exists()) {
-            val lines = soundsFile.readLines()
-            sounds = lines.mapNotNull { line ->
-                val parts = line.split("|")
-                if (parts.size == 4) {
-                    SoundItem(
-                        id = parts[0],
-                        name = parts[1],
-                        resId = parts[2].toIntOrNull(),
-                        filePath = parts[3].takeIf { it != "null" }
-                    )
-                } else null
+    fun saveSounds(list: List<SoundItem>) {
+        scope.launch(Dispatchers.IO) {
+            val content = list.joinToString("\n") {
+                "${it.id}|${it.name}|${it.resId ?: "null"}|${it.filePath ?: "null"}"
             }
-        } else {
-            // Initial defaults
-            sounds = listOf(
-                SoundItem(name = "Dexter", resId = R.raw.dexter),
-                SoundItem(name = "Bruh", resId = R.raw.bruh),
-                SoundItem(name = "Bazooka", resId = R.raw.rip_my_granny),
-                SoundItem(name = "Dial Up", resId = R.raw.dial_up),
-                SoundItem(name = "Galaxy Meme", resId = R.raw.galaxy_meme),
-                SoundItem(name = "Gay Echo", resId = R.raw.gay_echo),
-                SoundItem(name = "Gop Gop Gop", resId = R.raw.gopgopgop),
-                SoundItem(name = "Lego Breaking", resId = R.raw.lego_breaking),
-                SoundItem(name = "FAHHHHH", resId = R.raw.fah),
-                SoundItem(name = "Max Verstappen", resId = R.raw.max_verstrappen),
-                SoundItem(name = "PLZ SPEED I NEED THISS", resId = R.raw.my_mom_is_kinda_homeless),
-                SoundItem(name = "SIXX SEVENN", resId = R.raw.six_seven),
-                SoundItem(name = "Vine Boom", resId = R.raw.vine_boom),
-                SoundItem(name = "Oh My God", resId = R.raw.oh_my_god),
-                SoundItem(name = "500 Cigarettes", resId = R.raw.fivehundred_cigarettes),
-                SoundItem(name = "GET OUT", resId = R.raw.get_out),
-                SoundItem(name = "Wat da HAILLL", resId = R.raw.wait_what_the_hail),
-                SoundItem(name = "Wobbly Wiggly", resId = R.raw.wobbly_wiggly),
-                SoundItem(name = "John CENAA!", resId = R.raw.john_cena),
-                SoundItem(name = "Yo Phone Linging", resId = R.raw.yo_phone_linging),
-                SoundItem(name = "Kim Jong Goon", resId = R.raw.kim_jong_goon),
-                SoundItem(name = "Prowler", resId = R.raw.prowler)
-            )
+            soundsFile.writeText(content)
         }
     }
 
-    // Save sounds
-    fun saveSounds(list: List<SoundItem>) {
-        val content = list.joinToString("\n") { 
-            "${it.id}|${it.name}|${it.resId ?: "null"}|${it.filePath ?: "null"}"
+    LaunchedEffect(soundsFile) {
+        withContext(Dispatchers.IO) {
+            if (soundsFile.exists()) {
+                val lines = soundsFile.readLines()
+                val loaded = lines.mapNotNull { line ->
+                    val parts = line.split("|")
+                    if (parts.size == 4) {
+                        SoundItem(
+                            id = parts[0],
+                            name = parts[1],
+                            resId = parts[2].toIntOrNull(),
+                            filePath = parts[3].takeIf { it != "null" }
+                        )
+                    } else null
+                }
+                withContext(Dispatchers.Main) { sounds = loaded }
+            } else {
+                withContext(Dispatchers.Main) { sounds = defaultSounds }
+            }
         }
-        soundsFile.writeText(content)
     }
 
     val mediaPlayer = remember {
@@ -148,45 +175,31 @@ fun SoundboardScreen() {
         try {
             mediaPlayer.reset()
             if (sound.resId != null) {
-                val afd = context.resources.openRawResourceFd(sound.resId)
+                val afd = resources.openRawResourceFd(sound.resId)
                 mediaPlayer.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
                 afd.close()
             } else if (sound.filePath != null) {
                 mediaPlayer.setDataSource(sound.filePath)
             }
-            
-            mediaPlayer.setOnCompletionListener {
-                isPlaying.value = false
-            }
-            
+            mediaPlayer.setOnCompletionListener { isPlaying = false }
             mediaPlayer.prepare()
-            mediaPlayer.setVolume(1.0f, 1.0f)
             mediaPlayer.start()
-            isPlaying.value = true
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+            isPlaying = true
+        } catch (e: Exception) { e.printStackTrace() }
     }
 
     val stopSound = {
-        if (mediaPlayer.isPlaying) {
-            mediaPlayer.stop()
-        }
-        isPlaying.value = false
+        if (mediaPlayer.isPlaying) mediaPlayer.stop()
+        isPlaying = false
     }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            mediaPlayer.release()
-        }
-    }
+    DisposableEffect(Unit) { onDispose { mediaPlayer.release() } }
 
-    val pickAudioLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
+    val pickAudioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             pendingUri = uri
-            showNameDialog = true
+            inputName = ""
+            showAddDialog = true
         }
     }
 
@@ -195,216 +208,133 @@ fun SoundboardScreen() {
         containerColor = Color.Black,
         topBar = {
             CenterAlignedTopAppBar(
-                title = { 
-                    Text(
-                        text = "MemeBoard",
-                        color = Color.White,
-                        fontSize = 28.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                title = { Text(text = "MemeBoard", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    AnimatedVisibility(visible = isEditMode, enter = fadeIn() + scaleIn(), exit = fadeOut() + scaleOut()) {
+                        IconButton(onClick = { showResetDialog = true }) {
+                            Icon(imageVector = Icons.Default.Refresh, contentDescription = "Reset", tint = Color(0xFFFF5252))
+                        }
+                    }
                 },
                 actions = {
                     IconButton(onClick = { isEditMode = !isEditMode }) {
-                        Icon(
-                            imageVector = if (isEditMode) Icons.Default.Check else Icons.Default.Edit,
-                            contentDescription = if (isEditMode) "Done" else "Edit",
-                            tint = Color(0xFF90CAF9)
-                        )
+                        Icon(imageVector = if (isEditMode) Icons.Default.Check else Icons.Default.Edit, contentDescription = "Toggle Edit", tint = Color(0xFF90CAF9))
                     }
                 },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent)
             )
         },
         floatingActionButton = {
-            AnimatedVisibility(
-                visible = isEditMode,
-                enter = scaleIn(animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy)) + fadeIn(),
-                exit = scaleOut() + fadeOut()
-            ) {
-                FloatingActionButton(
-                    onClick = { pickAudioLauncher.launch("audio/*") },
-                    containerColor = Color(0xFF4CAF50),
-                    contentColor = Color.White,
-                    shape = CircleShape
-                ) {
+            AnimatedVisibility(visible = isEditMode, enter = scaleIn() + fadeIn(), exit = scaleOut() + fadeOut()) {
+                FloatingActionButton(onClick = { pickAudioLauncher.launch("audio/*") }, containerColor = Color(0xFF4CAF50), contentColor = Color.White, shape = CircleShape) {
                     Icon(Icons.Default.Add, contentDescription = "Add Sound")
                 }
             }
         }
     ) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
+        Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             val gridState = rememberLazyGridState()
-            
-            Box(modifier = Modifier.fillMaxSize()) {
-                LazyVerticalGrid(
-                    state = gridState,
-                    columns = GridCells.Fixed(2),
-                    contentPadding = PaddingValues(start = 16.dp, end = 24.dp, top = 8.dp, bottom = 100.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    items(sounds, key = { it.id }) { sound ->
-                        Box(
-                            modifier = Modifier.animateItem(
-                                fadeInSpec = tween(300),
-                                fadeOutSpec = tween(300),
-                                placementSpec = spring(stiffness = Spring.StiffnessMediumLow)
-                            )
-                        ) {
-                            SoundButton(
-                                name = sound.name,
-                                isEditMode = isEditMode,
-                                onRemove = {
-                                    sounds = sounds.filter { it.id != sound.id }
-                                    saveSounds(sounds)
-                                },
-                                onClick = {
-                                    if (!isEditMode) playSound(sound)
-                                }
-                            )
-                        }
-                    }
-                }
-
-                // Scrollbar implementation
-                if (sounds.isNotEmpty()) {
-                    val scrollbarColor = Color(0xFF90CAF9)
-                    
-                    val thumbHeightFraction by remember {
-                        derivedStateOf {
-                            val layoutInfo = gridState.layoutInfo
-                            val totalItems = layoutInfo.totalItemsCount
-                            val visibleItemsCount = layoutInfo.visibleItemsInfo.size
-                            if (totalItems > 0) visibleItemsCount.toFloat() / totalItems else 1f
-                        }
-                    }
-
-                    val scrollOffsetFraction by remember {
-                        derivedStateOf {
-                            val layoutInfo = gridState.layoutInfo
-                            val totalItems = layoutInfo.totalItemsCount
-                            val firstVisibleItem = gridState.firstVisibleItemIndex
-                            val firstVisibleItemOffset = gridState.firstVisibleItemScrollOffset
-                            val itemHeight = layoutInfo.visibleItemsInfo.firstOrNull()?.size?.height?.toFloat() ?: 1f
-                            
-                            val totalRows = ceil(totalItems / 2.0).toFloat()
-                            val totalHeight = totalRows * itemHeight
-                            val viewportHeight = layoutInfo.viewportSize.height.toFloat()
-                            
-                            val scrollOffset = (firstVisibleItem / 2).toFloat() * itemHeight + firstVisibleItemOffset
-                            val maxScroll = (totalHeight - viewportHeight).coerceAtLeast(1f)
-                            (scrollOffset / maxScroll).coerceIn(0f, 1f)
-                        }
-                    }
-
-                    val showScrollbar by remember {
-                        derivedStateOf {
-                            gridState.layoutInfo.totalItemsCount > gridState.layoutInfo.visibleItemsInfo.size
-                        }
-                    }
-
-                    if (showScrollbar) {
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.CenterEnd)
-                                .padding(end = 4.dp, top = 16.dp, bottom = 100.dp)
-                                .fillMaxHeight()
-                                .width(4.dp)
-                                .background(scrollbarColor.copy(alpha = 0.1f), CircleShape)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .fillMaxHeight(thumbHeightFraction.coerceIn(0.1f, 1f))
-                                    .graphicsLayer {
-                                        translationY = (size.height * (1f - thumbHeightFraction.coerceIn(0.1f, 1f))) * scrollOffsetFraction
-                                    }
-                                    .background(scrollbarColor, CircleShape)
-                            )
-                        }
+            LazyVerticalGrid(
+                state = gridState,
+                columns = GridCells.Fixed(2),
+                userScrollEnabled = !isAnyItemDragging,
+                contentPadding = PaddingValues(16.dp, 8.dp, 24.dp, 100.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                itemsIndexed(sounds, key = { _, it -> it.id }) { index, sound ->
+                    Box(modifier = Modifier.animateItem()) {
+                        SoundButton(
+                            sound = sound,
+                            isEditMode = isEditMode,
+                            onRemove = { soundToDelete = sound; showDeleteDialog = true },
+                            onRename = { soundToRename = sound; inputName = sound.name; showRenameDialog = true },
+                            onClick = { if (!isEditMode) playSound(sound) },
+                            onDrag = { from, to ->
+                                val newList = sounds.toMutableList()
+                                Collections.swap(newList, from, to)
+                                sounds = newList
+                                saveSounds(newList)
+                            },
+                            onDragStateChange = { isAnyItemDragging = it },
+                            index = index,
+                            totalCount = sounds.size
+                        )
                     }
                 }
             }
 
-            AnimatedVisibility(
-                visible = isPlaying.value,
-                enter = scaleIn() + slideInVertically(initialOffsetY = { it }),
-                exit = scaleOut() + slideOutVertically(targetOffsetY = { it }),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 32.dp)
-            ) {
-                Button(
-                    onClick = { stopSound() },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFFFF5252)
-                    ),
-                    shape = CircleShape,
-                    modifier = Modifier.size(64.dp),
-                    contentPadding = PaddingValues(0.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(24.dp)
-                            .background(Color.White, RoundedCornerShape(4.dp))
-                    )
+            AnimatedVisibility(visible = isPlaying, enter = scaleIn(), exit = scaleOut(), modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 32.dp)) {
+                Button(onClick = { stopSound() }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252)), shape = CircleShape, modifier = Modifier.size(64.dp), contentPadding = PaddingValues(0.dp)) {
+                    Box(modifier = Modifier.size(24.dp).background(Color.White, RoundedCornerShape(4.dp)))
                 }
             }
         }
     }
 
-    if (showNameDialog) {
+    // Dialogs remain largely the same, but use 'saveSounds' safely
+    if (showAddDialog) {
         AlertDialog(
-            onDismissRequest = { 
-                showNameDialog = false 
-                newSoundName = ""
-            },
+            onDismissRequest = { showAddDialog = false },
             title = { Text("Sound Name") },
-            text = {
-                TextField(
-                    value = newSoundName,
-                    onValueChange = { newSoundName = it },
-                    placeholder = { Text("Enter name...") }
-                )
-            },
+            text = { TextField(value = inputName, onValueChange = { inputName = it }) },
             confirmButton = {
                 Button(onClick = {
                     val uri = pendingUri
-                    val currentName = newSoundName
-                    if (uri != null && currentName.isNotBlank()) {
-                        val mimeType = context.contentResolver.getType(uri)
-                        val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType) ?: "mp3"
-                        val fileName = "sound_${System.currentTimeMillis()}.$extension"
-                        
-                        val file = File(context.filesDir, fileName)
-                        context.contentResolver.openInputStream(uri)?.use { input ->
-                            FileOutputStream(file).use { output ->
-                                input.copyTo(output)
+                    if (uri != null && inputName.isNotBlank()) {
+                        scope.launch(Dispatchers.IO) {
+                            val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(context.contentResolver.getType(uri)) ?: "mp3"
+                            val file = File(context.filesDir, "sound_${System.currentTimeMillis()}.$extension")
+                            context.contentResolver.openInputStream(uri)?.use { input -> FileOutputStream(file).use { output -> input.copyTo(output) } }
+                            withContext(Dispatchers.Main) {
+                                val newList = sounds + SoundItem(name = inputName, filePath = file.absolutePath)
+                                sounds = newList; saveSounds(newList); showAddDialog = false
                             }
                         }
-                        val newItem = SoundItem(name = currentName, filePath = file.absolutePath)
-                        val newList = sounds + newItem
-                        sounds = newList
-                        saveSounds(newList)
-                        newSoundName = ""
-                        showNameDialog = false
                     }
-                }) {
-                    Text("Add")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { 
-                    showNameDialog = false 
-                    newSoundName = ""
-                }) {
-                    Text("Cancel")
-                }
+                }) { Text("Add") }
+            }
+        )
+    }
+
+    if (showRenameDialog) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("Rename") },
+            text = { TextField(value = inputName, onValueChange = { inputName = it }) },
+            confirmButton = {
+                Button(onClick = {
+                    sounds = sounds.map { if (it.id == soundToRename?.id) it.copy(name = inputName) else it }
+                    saveSounds(sounds); showRenameDialog = false
+                }) { Text("Rename") }
+            }
+        )
+    }
+
+    if (showDeleteDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("Delete Sound") },
+            text = { Text("Delete \"${soundToDelete?.name}\"?") },
+            confirmButton = {
+                Button(onClick = {
+                    sounds = sounds.filter { it.id != soundToDelete?.id }
+                    saveSounds(sounds); showDeleteDialog = false
+                }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))) { Text("Delete") }
+            }
+        )
+    }
+
+    if (showResetDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetDialog = false },
+            title = { Text("Reset") },
+            text = { Text("This will delete custom sounds. Continue?") },
+            confirmButton = {
+                Button(onClick = {
+                    sounds = defaultSounds; saveSounds(defaultSounds); showResetDialog = false
+                }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))) { Text("Reset") }
             }
         )
     }
@@ -412,101 +342,66 @@ fun SoundboardScreen() {
 
 @Composable
 fun SoundButton(
-    name: String,
-    isEditMode: Boolean,
-    onRemove: () -> Unit,
-    onClick: () -> Unit
+    sound: SoundItem, isEditMode: Boolean, onRemove: () -> Unit, onRename: () -> Unit, onClick: () -> Unit,
+    onDrag: (Int, Int) -> Unit, onDragStateChange: (Boolean) -> Unit, index: Int, totalCount: Int
 ) {
-    val randomDurationRotation = remember { (90..120).random() }
-    val randomDurationX = remember { (70..110).random() }
-    val randomDurationY = remember { (80..130).random() }
-    val randomMaxRotation = remember { (10..20).random() / 10f }
-    val randomMaxTranslation = remember { (5..15).random() / 10f }
-
+    val haptic = LocalHapticFeedback.current
     val infiniteTransition = rememberInfiniteTransition(label = "shake")
-    
+
+    // Consistent random seed for each item to avoid warnings and "jumping" animations
+    val seed = remember(sound.id) { sound.id.hashCode() }
+    val random = remember(seed) { java.util.Random(seed.toLong()) }
+    val duration = remember(seed) { random.nextInt(30) + 100 }
+
     val rotation by infiniteTransition.animateFloat(
-        initialValue = -randomMaxRotation,
-        targetValue = randomMaxRotation,
-        animationSpec = infiniteRepeatable(
-            animation = tween(randomDurationRotation, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "rotation"
+        initialValue = -1f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(animation = tween(duration, easing = LinearEasing), repeatMode = RepeatMode.Reverse), label = "rot"
     )
 
-    val translationX by infiniteTransition.animateFloat(
-        initialValue = -randomMaxTranslation,
-        targetValue = randomMaxTranslation,
-        animationSpec = infiniteRepeatable(
-            animation = tween(randomDurationX, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "translationX"
-    )
-    val translationY by infiniteTransition.animateFloat(
-        initialValue = -randomMaxTranslation,
-        targetValue = randomMaxTranslation,
-        animationSpec = infiniteRepeatable(
-            animation = tween(randomDurationY, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "translationY"
-    )
+    var dragOffset by remember { mutableStateOf(Offset.Zero) }
+    var isDragging by remember { mutableStateOf(false) }
 
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(56.dp)
-            .graphicsLayer { 
-                if (isEditMode) {
-                    rotationZ = rotation
-                    this.translationX = translationX
-                    this.translationY = translationY
-                }
+        modifier = Modifier.fillMaxWidth().height(56.dp).zIndex(if (isDragging) 1f else 0f)
+            .graphicsLayer {
+                if (isEditMode && !isDragging) { rotationZ = rotation }
+                if (isDragging) { translationX = dragOffset.x; translationY = dragOffset.y; scaleX = 1.1f; scaleY = 1.1f }
+            }
+            .pointerInput(isEditMode) {
+                if (!isEditMode) return@pointerInput
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); isDragging = true; onDragStateChange(true) },
+                    onDragEnd = { isDragging = false; onDragStateChange(false); dragOffset = Offset.Zero },
+                    onDragCancel = { isDragging = false; onDragStateChange(false); dragOffset = Offset.Zero },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        dragOffset += dragAmount
+                        val itemW = size.width.toFloat(); val itemH = size.height.toFloat(); val spacing = 12.dp.toPx()
+                        val threshX = itemW / 2f + spacing / 2f; val threshY = itemH / 2f + spacing / 2f
+
+                        if (dragOffset.x > threshX && index % 2 == 0 && index + 1 < totalCount) {
+                            onDrag(index, index + 1); dragOffset = dragOffset.copy(x = dragOffset.x - (itemW + spacing))
+                        } else if (dragOffset.x < -threshX && index % 2 != 0) {
+                            onDrag(index, index - 1); dragOffset = dragOffset.copy(x = dragOffset.x + (itemW + spacing))
+                        }
+                        if (dragOffset.y > threshY && index + 2 < totalCount) {
+                            onDrag(index, index + 2); dragOffset = dragOffset.copy(y = dragOffset.y - (itemH + spacing))
+                        } else if (dragOffset.y < -threshY && index - 2 >= 0) {
+                            onDrag(index, index - 2); dragOffset = dragOffset.copy(y = dragOffset.y + (itemH + spacing))
+                        }
+                    }
+                )
             }
     ) {
-        Button(
-            onClick = onClick,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color(0xFF90CAF9),
-                contentColor = Color.Black
-            ),
-            shape = RoundedCornerShape(28.dp),
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 8.dp)
-        ) {
-            Text(
-                text = name,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center,
-                maxLines = 1
-            )
+        Button(onClick = onClick, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF90CAF9), contentColor = Color.Black), shape = RoundedCornerShape(28.dp), modifier = Modifier.fillMaxSize()) {
+            Text(text = sound.name, fontSize = 14.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 1)
         }
-
-        AnimatedVisibility(
-            visible = isEditMode,
-            enter = scaleIn(animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy)) + fadeIn(),
-            exit = scaleOut() + fadeOut(),
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .offset(x = 4.dp, y = (-4).dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(24.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFFFF5252))
-                    .clickable { onRemove() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "Remove",
-                    tint = Color.White,
-                    modifier = Modifier.size(16.dp)
-                )
+        if (isEditMode) {
+            Box(modifier = Modifier.align(Alignment.TopEnd).offset(4.dp, (-4).dp).size(24.dp).clip(CircleShape).background(Color(0xFFFF5252)).clickable { onRemove() }, contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.Close, null, tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+            Box(modifier = Modifier.align(Alignment.BottomEnd).offset(4.dp, 4.dp).size(24.dp).clip(CircleShape).background(Color(0xFF1976D2)).clickable { onRename() }, contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.Edit, null, tint = Color.White, modifier = Modifier.size(14.dp))
             }
         }
     }
