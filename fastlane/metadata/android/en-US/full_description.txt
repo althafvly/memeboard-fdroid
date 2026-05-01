@@ -2,7 +2,6 @@ A soundboard with your favourite goofy ahh meme sound effects. Updated regurlarl
 
 CHANGELOG:
 
--Added ability to rearrange and rename sound buttons and to reset memeboard to default configuration (requested by: @xad0x)
--Added sounds: ACK, bone crack, rizz, This is the end, chicken screaming on tree (all requested by: @xad0x) and FNAF jumpscare(requested by: Egor on gmail)
+-Quickly fixed the jankiness of the rearrange feature, making it more reliable.
 
 For sound effect requests email: memeboardrequests@gmail.com
