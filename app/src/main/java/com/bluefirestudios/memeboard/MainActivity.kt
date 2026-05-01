@@ -12,6 +12,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -38,6 +39,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
@@ -52,9 +55,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
-import java.util.Collections
 import java.util.UUID
-import kotlin.math.ceil
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -76,13 +77,28 @@ data class SoundItem(
     val filePath: String? = null
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
+// All coordinates in ROOT space so both onGloballyPositioned and pointerInput agree.
+data class ItemBounds(
+    val index: Int,
+    val rootX: Float,
+    val rootY: Float,
+    val w: Float,
+    val h: Float
+) {
+    val centerX get() = rootX + w / 2f
+    val centerY get() = rootY + h / 2f
+    fun contains(rootPx: Float, rootPy: Float) =
+        rootPx in rootX..(rootX + w) && rootPy in rootY..(rootY + h)
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SoundboardScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val resources = remember(context) { context.resources }
-    val soundsFile = remember(context) { File(context.filesDir, "sounds_list.txt") }
+
+    val resources = remember { context.resources }
+    val soundsFile = remember { File(context.filesDir, "sounds_list.txt") }
 
     val defaultSounds = remember {
         listOf(
@@ -99,7 +115,6 @@ fun SoundboardScreen() {
             SoundItem(name = "Gop Gop Gop", resId = R.raw.gopgopgop),
             SoundItem(name = "Lego Breaking", resId = R.raw.lego_breaking),
             SoundItem(name = "FAHHHHH", resId = R.raw.fah),
-            SoundItem(name = "FNAF jumpscare", resId = R.raw.fnaf),
             SoundItem(name = "Rizz", resId = R.raw.rizz),
             SoundItem(name = "Max Verstappen", resId = R.raw.max_verstrappen),
             SoundItem(name = "PLZ SPEED I NEED THISS", resId = R.raw.my_mom_is_kinda_homeless),
@@ -119,7 +134,7 @@ fun SoundboardScreen() {
 
     var sounds by remember { mutableStateOf(listOf<SoundItem>()) }
     var isEditMode by remember { mutableStateOf(false) }
-    var isAnyItemDragging by remember { mutableStateOf(false) }
+    var draggedIndex by remember { mutableStateOf<Int?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
@@ -129,6 +144,14 @@ fun SoundboardScreen() {
     var soundToDelete by remember { mutableStateOf<SoundItem?>(null) }
     var pendingUri by remember { mutableStateOf<Uri?>(null) }
     var inputName by remember { mutableStateOf("") }
+
+    // Plain HashMap — writes don't trigger recomposition, which is intentional.
+    // We only need these values during active drag hit-testing, not for rendering.
+    val itemBoundsMap = remember { HashMap<Int, ItemBounds>() }
+
+    // Root-coordinate offset of the grid, so we can convert pointerInput's
+    // local coordinates to root coordinates for hit-testing against itemBoundsMap.
+    var gridRootOffset by remember { mutableStateOf(Offset.Zero) }
 
     fun saveSounds(list: List<SoundItem>) {
         scope.launch(Dispatchers.IO) {
@@ -186,7 +209,9 @@ fun SoundboardScreen() {
             mediaPlayer.prepare()
             mediaPlayer.start()
             isPlaying = true
-        } catch (e: Exception) { e.printStackTrace() }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     val stopSound = {
@@ -194,7 +219,9 @@ fun SoundboardScreen() {
         isPlaying = false
     }
 
-    DisposableEffect(Unit) { onDispose { mediaPlayer.release() } }
+    DisposableEffect(mediaPlayer) {
+        onDispose { mediaPlayer.release() }
+    }
 
     val pickAudioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
@@ -209,25 +236,53 @@ fun SoundboardScreen() {
         containerColor = Color.Black,
         topBar = {
             CenterAlignedTopAppBar(
-                title = { Text(text = "MemeBoard", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold) },
+                title = {
+                    Text(
+                        text = "MemeBoard",
+                        color = Color.White,
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                },
                 navigationIcon = {
-                    AnimatedVisibility(visible = isEditMode, enter = fadeIn() + scaleIn(), exit = fadeOut() + scaleOut()) {
+                    AnimatedVisibility(
+                        visible = isEditMode,
+                        enter = fadeIn() + scaleIn(),
+                        exit = fadeOut() + scaleOut()
+                    ) {
                         IconButton(onClick = { showResetDialog = true }) {
-                            Icon(imageVector = Icons.Default.Refresh, contentDescription = "Reset", tint = Color(0xFFFF5252))
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Reset",
+                                tint = Color(0xFFFF5252)
+                            )
                         }
                     }
                 },
                 actions = {
                     IconButton(onClick = { isEditMode = !isEditMode }) {
-                        Icon(imageVector = if (isEditMode) Icons.Default.Check else Icons.Default.Edit, contentDescription = "Toggle Edit", tint = Color(0xFF90CAF9))
+                        Icon(
+                            imageVector = if (isEditMode) Icons.Default.Check else Icons.Default.Edit,
+                            contentDescription = "Toggle Edit",
+                            tint = Color(0xFF90CAF9)
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent)
             )
         },
         floatingActionButton = {
-            AnimatedVisibility(visible = isEditMode, enter = scaleIn() + fadeIn(), exit = scaleOut() + fadeOut()) {
-                FloatingActionButton(onClick = { pickAudioLauncher.launch("audio/*") }, containerColor = Color(0xFF4CAF50), contentColor = Color.White, shape = CircleShape) {
+            AnimatedVisibility(
+                visible = isEditMode,
+                enter = scaleIn() + fadeIn(),
+                exit = scaleOut() + fadeOut()
+            ) {
+                FloatingActionButton(
+                    onClick = { pickAudioLauncher.launch("audio/*") },
+                    containerColor = Color(0xFF4CAF50),
+                    contentColor = Color.White,
+                    shape = CircleShape
+                ) {
                     Icon(Icons.Default.Add, contentDescription = "Add Sound")
                 }
             }
@@ -235,46 +290,111 @@ fun SoundboardScreen() {
     ) { innerPadding ->
         Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             val gridState = rememberLazyGridState()
+
             LazyVerticalGrid(
                 state = gridState,
                 columns = GridCells.Fixed(2),
-                userScrollEnabled = !isAnyItemDragging,
-                contentPadding = PaddingValues(16.dp, 8.dp, 24.dp, 100.dp),
+                userScrollEnabled = draggedIndex == null,
+                contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 24.dp, bottom = 100.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier
+                    .fillMaxSize()
+                    // Record the grid's own position in root space once per layout pass.
+                    // pointerInput gives us LOCAL coords; adding this offset gives root coords.
+                    .onGloballyPositioned { coords ->
+                        gridRootOffset = coords.positionInRoot()
+                    }
+                    // The gesture detector lives on the GRID, not on each Button.
+                    // This means the long-press is seen here before any child can consume it,
+                    // which fixes the "sometimes won't grab" issue.
+                    .pointerInput(isEditMode) {
+                        if (!isEditMode) return@pointerInput
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { localOffset ->
+                                // local → root
+                                val rootPx = localOffset.x + gridRootOffset.x
+                                val rootPy = localOffset.y + gridRootOffset.y
+                                val hit = itemBoundsMap.values.firstOrNull { it.contains(rootPx, rootPy) }
+                                draggedIndex = hit?.index
+                            },
+                            onDrag = { change, _ ->
+                                change.consume()
+                                val currentDragged = draggedIndex ?: return@detectDragGesturesAfterLongPress
+
+                                val rootPx = change.position.x + gridRootOffset.x
+                                val rootPy = change.position.y + gridRootOffset.y
+
+                                // Only swap when the finger has crossed the CENTER of the
+                                // target cell — not just its edge. This stops jittery rapid-fire
+                                // swaps while moving slowly across a border.
+                                val target = itemBoundsMap.values.firstOrNull { bounds ->
+                                    if (bounds.index == currentDragged) return@firstOrNull false
+                                    if (!bounds.contains(rootPx, rootPy)) return@firstOrNull false
+                                    // Must cross midpoint in the direction of travel
+                                    if (bounds.index > currentDragged) {
+                                        rootPy > bounds.centerY || rootPx > bounds.centerX
+                                    } else {
+                                        rootPy < bounds.centerY || rootPx < bounds.centerX
+                                    }
+                                }
+                                if (target != null) {
+                                    val newList = sounds.toMutableList().apply {
+                                        val item = removeAt(currentDragged)
+                                        add(target.index, item)
+                                    }
+                                    sounds = newList
+                                    saveSounds(newList)
+                                    draggedIndex = target.index
+                                }
+                            },
+                            onDragEnd = { draggedIndex = null },
+                            onDragCancel = { draggedIndex = null }
+                        )
+                    }
             ) {
-                itemsIndexed(sounds, key = { _, it -> it.id }) { index, sound ->
+                itemsIndexed(sounds, key = { _, sound -> sound.id }) { index, sound ->
                     Box(modifier = Modifier.animateItem()) {
                         SoundButton(
                             sound = sound,
                             isEditMode = isEditMode,
+                            isDragged = draggedIndex == index,
                             onRemove = { soundToDelete = sound; showDeleteDialog = true },
                             onRename = { soundToRename = sound; inputName = sound.name; showRenameDialog = true },
                             onClick = { if (!isEditMode) playSound(sound) },
-                            onDrag = { from, to ->
-                                val newList = sounds.toMutableList()
-                                Collections.swap(newList, from, to)
-                                sounds = newList
-                                saveSounds(newList)
-                            },
-                            onDragStateChange = { isAnyItemDragging = it },
-                            index = index,
-                            totalCount = sounds.size
+                            onBoundsReported = { rootX, rootY, w, h ->
+                                itemBoundsMap[index] = ItemBounds(index, rootX, rootY, w, h)
+                            }
                         )
                     }
                 }
             }
 
-            AnimatedVisibility(visible = isPlaying, enter = scaleIn(), exit = scaleOut(), modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 32.dp)) {
-                Button(onClick = { stopSound() }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252)), shape = CircleShape, modifier = Modifier.size(64.dp), contentPadding = PaddingValues(0.dp)) {
-                    Box(modifier = Modifier.size(24.dp).background(Color.White, RoundedCornerShape(4.dp)))
+            AnimatedVisibility(
+                visible = isPlaying,
+                enter = scaleIn(),
+                exit = scaleOut(),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 32.dp)
+            ) {
+                Button(
+                    onClick = { stopSound() },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252)),
+                    shape = CircleShape,
+                    modifier = Modifier.size(64.dp),
+                    contentPadding = PaddingValues(0.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .background(Color.White, RoundedCornerShape(4.dp))
+                    )
                 }
             }
         }
     }
 
-    // Dialogs remain largely the same, but use 'saveSounds' safely
     if (showAddDialog) {
         AlertDialog(
             onDismissRequest = { showAddDialog = false },
@@ -285,12 +405,17 @@ fun SoundboardScreen() {
                     val uri = pendingUri
                     if (uri != null && inputName.isNotBlank()) {
                         scope.launch(Dispatchers.IO) {
-                            val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(context.contentResolver.getType(uri)) ?: "mp3"
+                            val extension = MimeTypeMap.getSingleton()
+                                .getExtensionFromMimeType(context.contentResolver.getType(uri)) ?: "mp3"
                             val file = File(context.filesDir, "sound_${System.currentTimeMillis()}.$extension")
-                            context.contentResolver.openInputStream(uri)?.use { input -> FileOutputStream(file).use { output -> input.copyTo(output) } }
+                            context.contentResolver.openInputStream(uri)?.use { input ->
+                                FileOutputStream(file).use { output -> input.copyTo(output) }
+                            }
                             withContext(Dispatchers.Main) {
                                 val newList = sounds + SoundItem(name = inputName, filePath = file.absolutePath)
-                                sounds = newList; saveSounds(newList); showAddDialog = false
+                                sounds = newList
+                                saveSounds(newList)
+                                showAddDialog = false
                             }
                         }
                     }
@@ -307,7 +432,8 @@ fun SoundboardScreen() {
             confirmButton = {
                 Button(onClick = {
                     sounds = sounds.map { if (it.id == soundToRename?.id) it.copy(name = inputName) else it }
-                    saveSounds(sounds); showRenameDialog = false
+                    saveSounds(sounds)
+                    showRenameDialog = false
                 }) { Text("Rename") }
             }
         )
@@ -319,10 +445,14 @@ fun SoundboardScreen() {
             title = { Text("Delete Sound") },
             text = { Text("Delete \"${soundToDelete?.name}\"?") },
             confirmButton = {
-                Button(onClick = {
-                    sounds = sounds.filter { it.id != soundToDelete?.id }
-                    saveSounds(sounds); showDeleteDialog = false
-                }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))) { Text("Delete") }
+                Button(
+                    onClick = {
+                        sounds = sounds.filter { it.id != soundToDelete?.id }
+                        saveSounds(sounds)
+                        showDeleteDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))
+                ) { Text("Delete") }
             }
         )
     }
@@ -333,75 +463,129 @@ fun SoundboardScreen() {
             title = { Text("Reset") },
             text = { Text("This will delete custom sounds. Continue?") },
             confirmButton = {
-                Button(onClick = {
-                    sounds = defaultSounds; saveSounds(defaultSounds); showResetDialog = false
-                }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))) { Text("Reset") }
+                Button(
+                    onClick = {
+                        sounds = defaultSounds
+                        saveSounds(defaultSounds)
+                        showResetDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))
+                ) { Text("Reset") }
             }
         )
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SoundButton(
-    sound: SoundItem, isEditMode: Boolean, onRemove: () -> Unit, onRename: () -> Unit, onClick: () -> Unit,
-    onDrag: (Int, Int) -> Unit, onDragStateChange: (Boolean) -> Unit, index: Int, totalCount: Int
+    sound: SoundItem,
+    isEditMode: Boolean,
+    isDragged: Boolean,
+    onRemove: () -> Unit,
+    onRename: () -> Unit,
+    onClick: () -> Unit,
+    onBoundsReported: (rootX: Float, rootY: Float, w: Float, h: Float) -> Unit
 ) {
     val haptic = LocalHapticFeedback.current
-    val infiniteTransition = rememberInfiniteTransition(label = "shake")
 
-    // Consistent random seed for each item to avoid warnings and "jumping" animations
+    LaunchedEffect(isDragged) {
+        if (isDragged) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+    }
+
+    val infiniteTransition = rememberInfiniteTransition(label = "shake_${sound.id}")
     val seed = remember(sound.id) { sound.id.hashCode() }
-    val random = remember(seed) { java.util.Random(seed.toLong()) }
-    val duration = remember(seed) { random.nextInt(30) + 100 }
+    val duration = remember(seed) { java.util.Random(seed.toLong()).nextInt(30) + 100 }
 
     val rotation by infiniteTransition.animateFloat(
-        initialValue = -1f, targetValue = 1f,
-        animationSpec = infiniteRepeatable(animation = tween(duration, easing = LinearEasing), repeatMode = RepeatMode.Reverse), label = "rot"
+        initialValue = -1f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = duration, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "rot_${sound.id}"
     )
 
-    var dragOffset by remember { mutableStateOf(Offset.Zero) }
-    var isDragging by remember { mutableStateOf(false) }
-
     Box(
-        modifier = Modifier.fillMaxWidth().height(56.dp).zIndex(if (isDragging) 1f else 0f)
-            .graphicsLayer {
-                if (isEditMode && !isDragging) { rotationZ = rotation }
-                if (isDragging) { translationX = dragOffset.x; translationY = dragOffset.y; scaleX = 1.1f; scaleY = 1.1f }
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .zIndex(if (isDragged) 1f else 0f)
+            .onGloballyPositioned { coords ->
+                val pos = coords.positionInRoot()
+                onBoundsReported(pos.x, pos.y, coords.size.width.toFloat(), coords.size.height.toFloat())
             }
-            .pointerInput(isEditMode) {
-                if (!isEditMode) return@pointerInput
-                detectDragGesturesAfterLongPress(
-                    onDragStart = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); isDragging = true; onDragStateChange(true) },
-                    onDragEnd = { isDragging = false; onDragStateChange(false); dragOffset = Offset.Zero },
-                    onDragCancel = { isDragging = false; onDragStateChange(false); dragOffset = Offset.Zero },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        dragOffset += dragAmount
-                        val itemW = size.width.toFloat(); val itemH = size.height.toFloat(); val spacing = 12.dp.toPx()
-                        val threshX = itemW / 2f + spacing / 2f; val threshY = itemH / 2f + spacing / 2f
-
-                        if (dragOffset.x > threshX && index % 2 == 0 && index + 1 < totalCount) {
-                            onDrag(index, index + 1); dragOffset = dragOffset.copy(x = dragOffset.x - (itemW + spacing))
-                        } else if (dragOffset.x < -threshX && index % 2 != 0) {
-                            onDrag(index, index - 1); dragOffset = dragOffset.copy(x = dragOffset.x + (itemW + spacing))
-                        }
-                        if (dragOffset.y > threshY && index + 2 < totalCount) {
-                            onDrag(index, index + 2); dragOffset = dragOffset.copy(y = dragOffset.y - (itemH + spacing))
-                        } else if (dragOffset.y < -threshY && index - 2 >= 0) {
-                            onDrag(index, index - 2); dragOffset = dragOffset.copy(y = dragOffset.y + (itemH + spacing))
-                        }
-                    }
-                )
+            .graphicsLayer {
+                if (isEditMode && !isDragged) rotationZ = rotation
+                if (isDragged) {
+                    scaleX = 1.12f
+                    scaleY = 1.12f
+                }
             }
     ) {
-        Button(onClick = onClick, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF90CAF9), contentColor = Color.Black), shape = RoundedCornerShape(28.dp), modifier = Modifier.fillMaxSize()) {
-            Text(text = sound.name, fontSize = 14.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 1)
-        }
+        // In edit mode, replace Button with a plain Box so that Button's internal
+        // touch handling can't intercept the long-press before the grid sees it.
         if (isEditMode) {
-            Box(modifier = Modifier.align(Alignment.TopEnd).offset(4.dp, (-4).dp).size(24.dp).clip(CircleShape).background(Color(0xFFFF5252)).clickable { onRemove() }, contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(28.dp))
+                    .background(if (isDragged) Color(0xFF64B5F6) else Color(0xFF90CAF9)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = sound.name,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    color = Color.Black,
+                    maxLines = 1
+                )
+            }
+        } else {
+            Button(
+                onClick = onClick,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF90CAF9),
+                    contentColor = Color.Black
+                ),
+                shape = RoundedCornerShape(28.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Text(
+                    text = sound.name,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1
+                )
+            }
+        }
+
+        if (isEditMode && !isDragged) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(4.dp, (-4).dp)
+                    .size(24.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFFFF5252))
+                    .clickable { onRemove() },
+                contentAlignment = Alignment.Center
+            ) {
                 Icon(Icons.Default.Close, null, tint = Color.White, modifier = Modifier.size(16.dp))
             }
-            Box(modifier = Modifier.align(Alignment.BottomEnd).offset(4.dp, 4.dp).size(24.dp).clip(CircleShape).background(Color(0xFF1976D2)).clickable { onRename() }, contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .offset(4.dp, 4.dp)
+                    .size(24.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF1976D2))
+                    .clickable { onRename() },
+                contentAlignment = Alignment.Center
+            ) {
                 Icon(Icons.Default.Edit, null, tint = Color.White, modifier = Modifier.size(14.dp))
             }
         }
